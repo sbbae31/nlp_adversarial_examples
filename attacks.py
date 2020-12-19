@@ -404,5 +404,167 @@ class GreedyAttack(object):
         return None
 
 
-testtes
-test
+class PerturbAttack(object):
+    def __init__(self, sess, model, dataset):
+        self.sess = sess
+        self.dataset = dataset
+        self.model = model
+
+    def score_token(self, x_orig, target):
+        x_adv = x_orig.copy()
+        x_len = len(x_adv)
+        THS_list = [0 * len(x_adv[:, np.newaxis])]
+        TTS_list = [0 * len(x_adv[:, np.newaxis])]
+        CS_list = [0 * len(x_adv[:, np.newaxis])]
+
+        for idx, x in enumerate(x_adv[:, np.newaxis]):
+            if idx == 0 or idx == x_len - 1:
+                continue
+            # Temporal Head Score (THS)
+            x_head_include = np.append(x_orig[:idx+1], [0] * (x_len - idx - 1))
+            x_head_include = x_head_include[np.newaxis, :]
+            x_head_exclude = np.append(x_orig[:idx], [0] * (x_len - idx))
+            x_head_exclude = x_head_exclude[np.newaxis, :]
+            THS_list[idx] = self.model.predict(self.sess, x_head_include)[0][target] \
+                - self.model.predict(self.sess, x_head_exclude)[0][target]
+
+            # Temporal Tail Score (TTS)
+            x_tail_include = np.append([0] * (x_len - idx - 1), x_orig[idx:])
+            x_tail_include = x_tail_include[np.newaxis, :]
+            x_tail_exclude = np.append([0] * (x_len - idx - 2), x_orig[idx+1:])
+            x_tail_exclude = x_tail_exclude[np.newaxis, :]
+            TTS_list[idx] = self.model.predict(self.sess, x_orig[np.newaxis, :])[0][target] \
+                - self.model.predict(self.sess, x_orig[np.newaxis, :])[0][target]
+
+            # Combined Score (CS)
+            CS_list[idx] = THS_list[idx] + TTS_list[idx]
+
+        return CS_list
+
+    def out_of_vocabulary(self, x_orig, target):
+        x_adv = x_orig.copy()
+        CS_list = self.score_token(x_orig, target)
+        
+        # choose target word to perturb
+        # weighted round robin based on the score
+        weighted_RR = []
+        for idx, s in enumerate(CS_list):
+            weighted_RR += [idx] * int(s * 1e4)
+        from random import choice
+        target_idx = choice(weighted_RR)
+        target_word = x_adv[target_idx]
+
+        # perturb the target word by swapping
+        swap_idx = choice(range(len(target_word) - 1))
+        target_word = list(target_word)
+        target_word[swap_idx], target_word[swap_idx+1] = \
+            target_word[swap_idx+1], target_word[swap_idx]
+        modified_word = ''.join(target_word)
+
+        x_adv[target_idx] = modified_word
+        return x_adv
+
+    def morphologically_similar(self, x_orig, target):
+        x_adv = x_orig.copy()
+        CS_list = self.score_token(x_orig, target)
+
+        # require: pip install nltk
+        # TO AVOID ERROR
+        # >>> import nltk
+        # >>> nltk.download('punkt')
+        # >>> nltk.download('averaged_perceptron_tagger')
+        from nltk.tokenize import word_tokenize
+        from nltk import pos_tag
+        words = word_tokenize(x_adv)
+        tokens = nltk.pos_tag(words)
+        
+        # choose target word to perturb
+        # weighted round robin based on the score
+        weighted_RR = []
+        for idx, s in enumerate(CS_list):
+            # filter out candidate words with inappropriate part-of-speech (POS)
+            # appropriate POS: VERB, NOUN
+            if tokens[idx][1] == 'V' or tokens[idx][1] == 'N':
+                weighted_RR += [idx] * int(s * 1e4)
+        from random import choice
+        target_idx = choice(weighted_RR)
+        target_word = x_adv[target_idx]
+
+        # perturb the target word to morphologically similar word
+        target_tag = tokens[target_idx]
+
+        # POS tag: VERB
+        # change verb tense to present / past / future
+        # change verb to singular / plural
+        if target_tag == 'V':
+            from pattern.en import conjugate
+            from pattern.en import PRESENT, PAST, FUTURE, SG, PL
+            modified_word = target_word
+            while(modified_word != target_word):
+                modified_word = conjugate(target_word, tense = choice([PRESENT, PAST, FUTURE]),
+                    number = choice([SG, PL]))
+
+        # POS tag: NOUN
+        # [singular] -> [plural] / [plural] -> [singular]
+        else:
+            from pattern.en import pluralize, singularize
+            if target_tag == 'NN' or target_tag == 'NNP':
+                modified_word = pluralize(target_word)
+            elif target_tag == 'NNS' or target_tag == 'NNPS':
+                modified_word = singularize(target_word)
+
+        x_adv[target_idx] = modified_word
+        return x_adv
+
+    def attack(self, x_orig, target, max_change=0.4):
+        x_adv = x_orig.copy()
+        doc_len = np.sum(np.sign(x_orig))
+        num_updates = 0
+        while ((num_updates / doc_len) < max_change):
+            
+            # # pick some word
+            # W = []  # Set of candidate updates
+            # list_x_new = []
+            # for i, x in enumerate(x_adv):
+            #     # for each word in x_adv
+            #     if x != self.dataset.dict["UNK"]:
+            #         # skip the UNK
+            #         x_list, _ = glove_utils.pick_most_similar_words(
+            #             x, self.dist_mat)
+            #         # TODO(malzantot) Score words in x_ based on the language model
+            #         # Add the selected word to the W list
+            #         # TODO(malzantot): check selected word is not equal to the original word.
+            #         for j in range(len(x_list)):
+            #             if x_list[j] != x_orig[i]:
+            #                 W.append((i, x_list[0]))
+            #                 x_new = x_adv.copy()
+            #                 x_new[i] = x_list[j]
+            #                 # print(self.inv_dict[x_orig[i]], ' -> ', self.inv_dict[x_new[i]])
+            #                 list_x_new.append(x_new)
+            #                 break
+            # x_new_pred_probs = np.array(
+            #     [self.model.predict(self.sess, x[np.newaxis, :])[0] for x in list_x_new])            
+            # x_new_preds = np.argmax(x_new_pred_probs, axis=1)
+            # x_new_scores = x_new_pred_probs[:, target]
+            # top_attack = np.argsort(x_new_scores)[-1]
+            # x_adv = list_x_new[top_attack]
+
+            population = 20
+            x_new_list = []
+            x_new_pred_probs = []
+            for idx in range(population):
+                x_new_adv = self.out_of_vocabulary(x_adv, target)
+                x_new_list.append(x_new_adv)
+                x_new_pred_probs.append((idx,
+                    self.model.predict(self.sess, x_new_adv[np.newaxis, :])[0]))
+            x_new_pred_probs.sort(key=lambda x : x[1][target], reverse=True)
+            x_new_preds = x_new_pred_probs[0][1][target]
+            x_adv = x_new_list[x_new_pred_probs[0][0]]
+
+            num_updates += 1
+            if x_new_preds > 0.5:
+                return x_adv
+        
+        return None
+
+    

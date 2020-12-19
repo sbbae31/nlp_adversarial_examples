@@ -151,7 +151,7 @@ print('most probable is ', nearest_w[np.argmax(lm_preds)])
 # In[17]:
 
 
-from attacks import GeneticAtack
+from attacks import PerturbAttack
 
 
 # ## Main Attack 
@@ -173,14 +173,7 @@ with tf.variable_scope('imdb', reuse=True):
                            lstm_size = lstm_size,
                            max_len = max_len,
                            embeddings_dim=300, vocab_size=dist_mat.shape[1],is_train = False)
-ga_atttack = GeneticAtack(sess, model, batch_model, neighbour_model, dataset, dist_mat, 
-                                  skip_list,
-                                  goog_lm, max_iters=30, 
-                                   pop_size=pop_size,
-                                  
-                                  n1 = n1,
-                                  n2 = 4,
-                                 use_lm = True, use_suffix=False)
+pt_attack = PerturbAtack(sess, model, dataset)
 
 
 # In[19]:
@@ -222,7 +215,7 @@ for i in range(SAMPLE_SIZE):
     orig_list.append(x_orig)
     target_label = 1 if orig_label == 0 else 0
     orig_label_list.append(orig_label)
-    x_adv = ga_atttack.attack( x_orig, target_label)
+    x_adv = pt_attack.attack( x_orig, target_label)
     adv_list.append(x_adv)
     if x_adv is None:
         print('%d failed' %(i+1))
